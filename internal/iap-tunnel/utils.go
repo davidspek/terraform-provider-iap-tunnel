@@ -68,9 +68,11 @@ func CreateSubprotocolAckFrame(ackBytes uint64) []byte {
 // CreateSubprotocolDataFrame packs a TAG_DATA + (data length) + data bytes.
 func CreateSubprotocolDataFrame(data []byte) []byte {
 	header := make([]byte, SUBPROTOCOL_HEADER_LEN)
+	out := make([]byte, 0, len(header)+len(data))
 	binary.BigEndian.PutUint16(header[0:2], SUBPROTOCOL_TAG_DATA)
 	binary.BigEndian.PutUint32(header[2:6], uint32(len(data)))
-	return append(header, data...)
+	out = append(out, header...)
+	return append(out, data...)
 }
 
 // ExtractSubprotocolTag extracts a 16-bit tag.

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 
-	"github.com/coder/websocket"
 	iap_tunnel "github.com/davidspek/terraform-provider-iap-tunnel/internal/iap-tunnel"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
@@ -169,13 +168,13 @@ func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.Ope
 	}
 	tunnelInfo.manager = m
 
-	listener, websocketConn, err := m.StartProxy(ctx)
+	err = m.StartProxy(ctx)
 	if err != nil {
 		resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
 		return
 	}
-	tunnelInfo.listener = listener
-	tunnelInfo.conn = websocketConn
+	tunnelInfo.listener = nil
+	tunnelInfo.conn = nil
 
 	r.tunnelTracker.Add(id, tunnelInfo)
 
@@ -191,13 +190,13 @@ func (r *IapTunnelEphemeralResource) closeByConnectionID(id string) diag.Diagnos
 		return diags
 	}
 
-	if err := tunnelInfo.conn.Close(websocket.StatusNormalClosure, ""); err != nil {
-		diags.AddError("Failed to close connection", fmt.Sprintf("Failed to close connection: %v", err))
-	}
+	// if err := tunnelInfo.conn.Close(websocket.StatusNormalClosure, ""); err != nil {
+	// 	diags.AddError("Failed to close connection", fmt.Sprintf("Failed to close connection: %v", err))
+	// }
 
-	if err := tunnelInfo.listener.Close(); err != nil {
-		diags.AddError("Failed to close listener", fmt.Sprintf("Failed to close listener: %v", err))
-	}
+	// if err := tunnelInfo.listener.Close(); err != nil {
+	// 	diags.AddError("Failed to close listener", fmt.Sprintf("Failed to close listener: %v", err))
+	// }
 
 	r.tunnelTracker.Remove(id)
 

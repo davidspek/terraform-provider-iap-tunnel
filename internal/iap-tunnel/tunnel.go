@@ -19,7 +19,7 @@ import (
 	oauthsvc "google.golang.org/api/oauth2/v2"
 )
 
-// Common URL and SubProtocol constants
+// Common URL and SubProtocol constants.
 const (
 	URL_SCHEME               = "wss"
 	URL_HOST                 = "tunnel.cloudproxy.app"
@@ -286,24 +286,18 @@ func (m *TunnelManager) StartTunnel(ctx context.Context, conn *websocket.Conn) (
 }
 
 // StartProxy listens on LocalPort, creates a new tunnel, then copies data in both directions.
-func (m *TunnelManager) StartProxy(ctx context.Context) (net.Listener, *websocket.Conn, error) {
-	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", m.LocalPort))
+func (m *TunnelManager) StartProxy(ctx context.Context) error {
+	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", 0))
 	if err != nil {
-		return lis, nil, fmt.Errorf("unable to listen on port %d: %w", m.LocalPort, err)
+		return fmt.Errorf("unable to listen on port %d: %w", 0, err)
 	}
-
-	websocketConn, err := m.StartSocket(ctx)
-	if err != nil {
-		_ = lis.Close()
-		return lis, nil, fmt.Errorf("unable to start socket: %w", err)
-	}
-
 	go func() {
 		for {
 			conn, err := lis.Accept()
 			if err != nil {
 				// return fmt.Errorf("unable to accept connection: %w", err)
 			}
+			websocketConn, err := m.StartSocket(ctx)
 			tunnel, err := m.StartTunnel(ctx, websocketConn)
 			if err != nil {
 				_ = conn.Close()
@@ -329,7 +323,7 @@ func (m *TunnelManager) StartProxy(ctx context.Context) (net.Listener, *websocke
 			}()
 		}
 	}()
-	return lis, websocketConn, nil
+	return nil
 }
 
 // StopProxy closes the listener on LocalPort and the tunnel.
