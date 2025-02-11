@@ -287,9 +287,9 @@ func (m *TunnelManager) StartTunnel(ctx context.Context, conn *websocket.Conn) (
 
 // StartProxy listens on LocalPort, creates a new tunnel, then copies data in both directions.
 func (m *TunnelManager) StartProxy(ctx context.Context) error {
-	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", 0))
+	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", m.LocalPort))
 	if err != nil {
-		return fmt.Errorf("unable to listen on port %d: %w", 0, err)
+		return fmt.Errorf("unable to listen on port %d: %w", m.LocalPort, err)
 	}
 	go func() {
 		for {
