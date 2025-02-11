@@ -168,13 +168,29 @@ func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.Ope
 	}
 	tunnelInfo.manager = m
 
-	err = m.StartProxy(ctx)
-	if err != nil {
-		resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
-		return
-	}
-	tunnelInfo.listener = nil
-	tunnelInfo.conn = nil
+	errChan := make(chan error)
+	tunnelCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		errChan <- m.StartProxy(tunnelCtx)
+	}()
+
+	// select {
+	// // wait 5 seconds for an error, otherwise just log since this will run in the background for the course of the apply
+	// case <-time.NewTimer(time.Second * 5).C:
+	// 	break
+	// case err := <-errChan:
+	// 	resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
+	// 	return
+	// }
+
+	// if err != nil {
+	// 	resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
+	// 	return
+	// }
+	// tunnelInfo.listener = lis
+	// tunnelInfo.conn = con
+
+	tunnelInfo.cancel = cancel
 
 	r.tunnelTracker.Add(id, tunnelInfo)
 
@@ -189,6 +205,8 @@ func (r *IapTunnelEphemeralResource) closeByConnectionID(id string) diag.Diagnos
 	if tunnelInfo == nil {
 		return diags
 	}
+
+	tunnelInfo.cancel()
 
 	// if err := tunnelInfo.conn.Close(websocket.StatusNormalClosure, ""); err != nil {
 	// 	diags.AddError("Failed to close connection", fmt.Sprintf("Failed to close connection: %v", err))

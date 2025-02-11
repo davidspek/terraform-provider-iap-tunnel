@@ -291,39 +291,42 @@ func (m *TunnelManager) StartProxy(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to listen on port %d: %w", m.LocalPort, err)
 	}
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				// return fmt.Errorf("unable to accept connection: %w", err)
-			}
-			websocketConn, err := m.StartSocket(ctx)
-			tunnel, err := m.StartTunnel(ctx, websocketConn)
-			if err != nil {
-				_ = conn.Close()
-				// return fmt.Errorf("unable to start tunnel: %w", err)
-			}
-
-			go func() {
-				// defer tunnel.Close()
-				// defer conn.Close()
-				_, copyErr := io.Copy(conn, tunnel)
-				if copyErr != nil && !errors.Is(copyErr, io.EOF) {
-					fmt.Println("copy from tunnel failed:", copyErr)
-				}
-			}()
-
-			go func() {
-				// defer tunnel.Close()
-				// defer conn.Close()
-				_, copyErr := io.Copy(tunnel, conn)
-				if copyErr != nil && !errors.Is(copyErr, io.EOF) {
-					fmt.Println("copy to tunnel failed:", copyErr)
-				}
-			}()
+	websocketConn, err := m.StartSocket(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to start WebSocket: %w", err)
+	}
+	// go func() {
+	for {
+		conn, err := lis.Accept()
+		if err != nil {
+			return fmt.Errorf("unable to accept connection: %w", err)
 		}
-	}()
-	return nil
+		tunnel, err := m.StartTunnel(ctx, websocketConn)
+		if err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("unable to start tunnel: %w", err)
+		}
+
+		go func() {
+			// defer tunnel.Close()
+			// defer conn.Close()
+			_, copyErr := io.Copy(conn, tunnel)
+			if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+				fmt.Println("copy from tunnel failed:", copyErr)
+			}
+		}()
+
+		go func() {
+			// defer tunnel.Close()
+			// defer conn.Close()
+			_, copyErr := io.Copy(tunnel, conn)
+			if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+				fmt.Println("copy to tunnel failed:", copyErr)
+			}
+		}()
+	}
+	// }()
+	// return lis, websocketConn, nil
 }
 
 // StopProxy closes the listener on LocalPort and the tunnel.

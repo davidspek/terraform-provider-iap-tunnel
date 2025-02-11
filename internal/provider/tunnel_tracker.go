@@ -4,10 +4,9 @@
 package provider
 
 import (
-	"net"
+	"context"
 	"sync"
 
-	"github.com/coder/websocket"
 	iap_tunnel "github.com/davidspek/terraform-provider-iap-tunnel/internal/iap-tunnel"
 )
 
@@ -44,7 +43,8 @@ func (t *TunnelTracker) Remove(name string) {
 }
 
 type TunnelInfo struct {
-	manager  *iap_tunnel.TunnelManager
-	conn     *websocket.Conn
-	listener net.Listener
+	manager *iap_tunnel.TunnelManager
+	cancel  context.CancelFunc
+	// conn     *websocket.Conn
+	// listener net.Listener
 }
