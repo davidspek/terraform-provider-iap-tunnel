@@ -14,7 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/tfversion"
 )
 
-func TestAccExampleEphemeralResource(t *testing.T) {
+func TestAccIapTunnelEphemeralResource(t *testing.T) {
 	resource.Test(t, resource.TestCase{
 		// Ephemeral resources are only available in 1.10 and later
 		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
@@ -24,7 +24,7 @@ func TestAccExampleEphemeralResource(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactoriesWithEcho,
 		Steps: []resource.TestStep{
 			{
-				Config: testAccExampleEphemeralResourceConfig("example"),
+				Config: testAccIapTunnelEphemeralResourceConfig("example"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"echo.test",
@@ -37,14 +37,14 @@ func TestAccExampleEphemeralResource(t *testing.T) {
 	})
 }
 
-func testAccExampleEphemeralResourceConfig(configurableAttribute string) string {
+func testAccIapTunnelEphemeralResourceConfig(configurableAttribute string) string {
 	return fmt.Sprintf(`
-ephemeral "scaffolding_example" "test" {
-  configurable_attribute = %[1]q
+ephemeral "google_iap_tunnel" "test" {
+  port = %[1]q
 }
 
 provider "echo" {
-  data = ephemeral.scaffolding_example.test
+  data = ephemeral.google_iap_tunnel.test
 }
 
 resource "echo" "test" {}

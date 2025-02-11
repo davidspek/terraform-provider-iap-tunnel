@@ -1,3 +1,3 @@
-provider "scaffolding" {
+provider "google-iap" {
   # example configuration here
 }
