@@ -43,7 +43,7 @@ func (t *TunnelTracker) Remove(name string) {
 }
 
 type TunnelInfo struct {
-	manager *iap_tunnel.TunnelManager
+	manager iap_tunnel.TunnelManager
 	cancel  context.CancelFunc
 	// conn     *websocket.Conn
 	// listener net.Listener

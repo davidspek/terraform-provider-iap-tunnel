@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"time"
 
 	iap_tunnel "github.com/davidspek/terraform-provider-iap-tunnel/internal/iap-tunnel"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -155,32 +156,83 @@ func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.Ope
 	}
 	resp.Private.SetKey(ctx, iapTunnelPrivateDataKey, b)
 
-	// Start the tunnel
-	m := &iap_tunnel.TunnelManager{
-		Target: iap_tunnel.IapTunnelTarget{
-			Project:   data.Project.String(),
-			Zone:      data.Zone.String(),
-			Instance:  data.Instance.String(),
-			Interface: data.Interface.String(),
-			Port:      int(data.RemotePort.ValueInt32()),
-		},
-		LocalPort: int(data.LocalPort.ValueInt32()),
+	target := iap_tunnel.IapTunnelTarget{
+		Project:   data.Project.String(),
+		Zone:      data.Zone.String(),
+		Instance:  data.Instance.String(),
+		Interface: data.Interface.String(),
+		Port:      int(data.RemotePort.ValueInt32()),
 	}
+
+	// Start the tunnel
+
+	m := iap_tunnel.NewTunnelManager(int(data.LocalPort.ValueInt32()), target)
 	tunnelInfo.manager = m
 
 	errChan := make(chan error)
 	tunnelCtx, cancel := context.WithCancel(context.Background())
+
+	// Start error monitoring goroutine
 	go func() {
-		errChan <- m.StartProxy(tunnelCtx)
+		for {
+			select {
+			case err := <-m.Errors():
+				if err != nil {
+					// Log error but don't fail - allow reconnection logic to handle it
+					fmt.Printf("Tunnel error: %v\n", err)
+				}
+			case <-tunnelCtx.Done():
+				return
+			}
+		}
 	}()
+
+	// Start proxy in goroutine
+	go func() {
+		for {
+			if err := m.StartProxy(tunnelCtx); err != nil {
+				select {
+				case errChan <- err:
+				case <-tunnelCtx.Done():
+					return
+				}
+			}
+
+			// If we get here, the proxy has stopped but context isn't cancelled
+			// Wait before attempting reconnection
+			select {
+			case <-tunnelCtx.Done():
+				return
+			case <-time.After(time.Second * 5):
+				continue
+			}
+		}
+	}()
+
+	tunnelInfo.cancel = cancel
+
+	// Wait for initial connection to be established
+	select {
+	case err := <-errChan:
+		if err != nil {
+			resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
+			cancel()
+			return
+		}
+	case <-time.After(time.Second * 10):
+		// Timeout waiting for initial connection
+		fmt.Println("Tunnel initialization completed")
+	}
+
+	r.tunnelTracker.Add(id, tunnelInfo)
 
 	// select {
 	// // wait 5 seconds for an error, otherwise just log since this will run in the background for the course of the apply
-	// case <-time.NewTimer(time.Second * 5).C:
+	// case <-tunnelCtx.Done():
 	// 	break
 	// case err := <-errChan:
 	// 	resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
-	// 	return
+	// 	break
 	// }
 
 	// if err != nil {
@@ -189,10 +241,6 @@ func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.Ope
 	// }
 	// tunnelInfo.listener = lis
 	// tunnelInfo.conn = con
-
-	tunnelInfo.cancel = cancel
-
-	r.tunnelTracker.Add(id, tunnelInfo)
 
 	// Save data into ephemeral result data
 	resp.Diagnostics.Append(resp.Result.Set(ctx, &data)...)
@@ -208,13 +256,15 @@ func (r *IapTunnelEphemeralResource) closeByConnectionID(id string) diag.Diagnos
 
 	tunnelInfo.cancel()
 
-	// if err := tunnelInfo.conn.Close(websocket.StatusNormalClosure, ""); err != nil {
-	// 	diags.AddError("Failed to close connection", fmt.Sprintf("Failed to close connection: %v", err))
-	// }
+	// Give some time for graceful shutdown
+	time.Sleep(time.Second)
 
-	// if err := tunnelInfo.listener.Close(); err != nil {
-	// 	diags.AddError("Failed to close listener", fmt.Sprintf("Failed to close listener: %v", err))
-	// }
+	// Stop the tunnel manager
+	if tunnelInfo.manager != nil {
+		if err := tunnelInfo.manager.Stop(); err != nil {
+			diags.AddError("Failed to stop tunnel manager", fmt.Sprintf("Failed to stop tunnel manager: %v", err))
+		}
+	}
 
 	r.tunnelTracker.Remove(id)
 
