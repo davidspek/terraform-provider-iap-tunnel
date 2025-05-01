@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/coder/websocket"
 )
 
 type IAPTunnelProtocol struct {
 	totalInboundLen uint64
 	outboundLock    sync.Mutex
-	dataChannel     chan []byte
 	errors          chan error
 	connected       bool
 	sid             uint64
@@ -20,35 +21,55 @@ type IAPTunnelProtocol struct {
 
 func NewIAPTunnelProtocol() *IAPTunnelProtocol {
 	return &IAPTunnelProtocol{
-		dataChannel: make(chan []byte, 100),
-		errors:      make(chan error, 100),
+		// dataChannel: make(chan []byte, 100),
+		errors: make(chan error, 100),
 	}
 }
 
-func (p *IAPTunnelProtocol) HandleMessage(ctx context.Context, msg []byte) error {
+// SendDataFrame sends a data frame over the websocket connection using the IAP tunnel protocol.
+func (p *IAPTunnelProtocol) SendDataFrame(conn *websocket.Conn, data []byte) error {
+	frame := p.CreateDataFrame(data)
+	ctx := context.Background()
+	// Use websocket.MessageBinary for binary frames
+	writer, err := conn.Writer(ctx, websocket.MessageBinary)
+	if err != nil {
+		return fmt.Errorf("failed to get websocket writer: %w", err)
+	}
+	_, err = writer.Write(frame)
+	fmt.Println("Sent data frame:", frame)
+	if err != nil {
+		writer.Close()
+		return fmt.Errorf("failed to write data frame: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("failed to close websocket writer: %w", err)
+	}
+	return nil
+}
+
+func (p *IAPTunnelProtocol) ParseDataFrame(msg []byte) ([]byte, error) {
 	if err := p.ValidateMessage(msg); err != nil {
-		return err
+		return nil, err
 	}
 
 	subprotocolTag, msg, err := p.ExtractSubprotocolTag(msg)
 	if err != nil {
-		return fmt.Errorf("unable to extract subprotocol tag: %w", err)
+		return nil, fmt.Errorf("unable to extract subprotocol tag: %w", err)
 	}
 
 	switch subprotocolTag {
 	case SUBPROTOCOL_TAG_CONNECT_SUCCESS_SID:
+		fmt.Println("Received Connect Success SID frame")
 		return p.handleConnectSuccess(msg)
 	case SUBPROTOCOL_TAG_ACK:
+		fmt.Println("Received ACK frame")
 		return p.handleAck(msg)
 	case SUBPROTOCOL_TAG_DATA:
-		return p.handleData(ctx, msg)
+		fmt.Println("Received data frame")
+		return p.handleData(msg)
 	default:
-		return errors.New("unknown subprotocol tag")
+		return nil, errors.New("unknown subprotocol tag")
 	}
-}
-
-func (p *IAPTunnelProtocol) DataChannel() <-chan []byte {
-	return p.dataChannel
 }
 
 func (p *IAPTunnelProtocol) ValidateMessage(msg []byte) error {
@@ -58,49 +79,44 @@ func (p *IAPTunnelProtocol) ValidateMessage(msg []byte) error {
 	return nil
 }
 
-func (p *IAPTunnelProtocol) handleConnectSuccess(msg []byte) error {
+func (p *IAPTunnelProtocol) handleConnectSuccess(msg []byte) ([]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	sid, _, err := p.ExtractSubprotocolConnectSuccessSid(msg)
 	if err != nil {
-		return fmt.Errorf("unable to extract connect success SID: %w", err)
+		return nil, fmt.Errorf("unable to extract connect success SID: %w", err)
 	}
 	p.connected = true
 	p.sid = sid
-	return nil
+	return nil, nil
 }
 
-func (p *IAPTunnelProtocol) handleAck(msg []byte) error {
+func (p *IAPTunnelProtocol) handleAck(msg []byte) ([]byte, error) {
 	_, _, err := p.ExtractSubprotocolAck(msg)
 	if err != nil {
-		return fmt.Errorf("unable to extract ack: %w", err)
+		return nil, fmt.Errorf("unable to extract ack: %w", err)
 	}
-	return nil
+	return nil, nil
 }
 
-func (p *IAPTunnelProtocol) handleData(ctx context.Context, msg []byte) error {
+func (p *IAPTunnelProtocol) handleData(msg []byte) ([]byte, error) {
 	data, _, err := p.ExtractData(msg)
 	if err != nil {
-		return fmt.Errorf("unable to extract data: %w", err)
+		return nil, fmt.Errorf("unable to extract data: %w", err)
 	}
 
 	p.totalInboundLen += uint64(len(data))
 
-	// Send ACK after receiving enough data
-	if p.totalInboundLen > 2*SUBPROTOCOL_MAX_DATA_FRAME_SIZE {
-		select {
-		case p.dataChannel <- p.CreateAckFrame(p.totalInboundLen):
-		default:
-		}
-	}
-
-	select {
-	case p.dataChannel <- data:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	return nil
+	// // TODO: reimplement this properly or elsewhere
+	// // Send ACK after receiving enough data
+	// if p.totalInboundLen > 2*SUBPROTOCOL_MAX_DATA_FRAME_SIZE {
+	// 	p.SendDataFrame(nil, p.CreateAckFrame(p.totalInboundLen))
+	// 	// case p.dataChannel <- p.CreateAckFrame(p.totalInboundLen):
+	// 	// default:
+	// 	// }
+	// }
+	return data, nil
 }
 
 // ExtractSubprotocolTag extracts a 16-bit tag.

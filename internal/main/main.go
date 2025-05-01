@@ -24,13 +24,14 @@ func main() {
 		cancel()
 	}()
 
-	target := iap_tunnel.IapTunnelTarget{
+	target := iap_tunnel.TunnelTarget{
 		Project:   "prj-dl-dev-ooms-dev-2037",
 		Zone:      "us-central1-a",
 		Instance:  "bastion-vm",
 		Interface: "nic0",
 		Port:      6432,
 	}
+	manager := iap_tunnel.NewTunnelManager(target, nil)
 
 	listenAddr := "localhost:6432"
 	lis, err := net.Listen("tcp", listenAddr)
@@ -40,10 +41,8 @@ func main() {
 	}
 	defer lis.Close()
 
-	m := iap_tunnel.NewTunnelManager(target)
-
 	go func() {
-		if err := m.Serve(ctx, lis); err != nil {
+		if err := manager.Serve(ctx, lis); err != nil {
 			fmt.Printf("Tunnel serve error: %v\n", err)
 		}
 	}()

@@ -26,7 +26,7 @@ type IapTunnelTarget struct {
 }
 
 // CreateWebSocketConnectURL builds the "connect" URL.
-func CreateWebSocketConnectURL(t IapTunnelTarget, newWebSocket bool) (string, error) {
+func CreateWebSocketConnectURL(t TunnelTarget, newWebSocket bool) (string, error) {
 	if t.Project == "" || t.Port == 0 {
 		return "", errors.New("missing required tunnel arguments: project or port")
 	}
@@ -46,7 +46,7 @@ func CreateWebSocketConnectURL(t IapTunnelTarget, newWebSocket bool) (string, er
 }
 
 // CreateWebSocketReconnectURL builds the "reconnect" URL.
-func CreateWebSocketReconnectURL(t IapTunnelTarget, sid uint64, ackBytes uint64, newWebSocket bool) (string, error) {
+func CreateWebSocketReconnectURL(t TunnelTarget, sid uint64, ackBytes uint64, newWebSocket bool) (string, error) {
 	u := createWebSocketURL(RECONNECT_ENDPOINT, map[string]string{
 		"sid":          fmt.Sprintf("%d", sid),
 		"ack":          fmt.Sprintf("%d", ackBytes),

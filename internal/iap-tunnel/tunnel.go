@@ -1,6 +1,3 @@
-// Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
-
 package iap_tunnel
 
 import (
@@ -9,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
+	"net/http"
 	"sync"
 	"time"
 
@@ -42,223 +39,149 @@ const (
 	SUBPROTOCOL_TAG_ACK                   uint16 = 0x0007
 )
 
-// tunnelAdapter abstracts the IAP WebSocket tunnel to an io.ReadWriteCloser.
+// TunnelTarget describes the remote IAP tunnel endpoint.
+type TunnelTarget struct {
+	Project     string
+	Zone        string
+	Instance    string
+	Interface   string
+	Port        int
+	URLOverride string
+	Network     string
+	Region      string
+	Host        string
+	DestGroup   string
+}
+
+// NewTunnelAdapter creates a TunnelAdapter that implements io.ReadWriteCloser over the IAP websocket connection.
+// protocol should implement your IAP tunnel protocol logic.
+func NewTunnelAdapter(wsConn *websocket.Conn, protocol *IAPTunnelProtocol) *tunnelAdapter {
+	return &tunnelAdapter{
+		conn:     wsConn,
+		protocol: protocol,
+		inbound:  make(chan []byte, 100),
+		errors:   make(chan error, 10),
+		closed:   make(chan struct{}),
+	}
+}
+
+// tunnelAdapter implements io.ReadWriteCloser for the tunnel.
 type tunnelAdapter struct {
 	conn     *websocket.Conn
-	protocol TunnelProtocol
+	protocol *IAPTunnelProtocol
 	inbound  chan []byte
 	errors   chan error
-	cancel   context.CancelFunc
-	writeCtx context.Context
+	closed   chan struct{}
+	pending  []byte
 }
 
-// NewTunnelAdapter creates a tunnelAdapter and sets up inbound channels.
-func NewTunnelAdapter(conn *websocket.Conn, protocol TunnelProtocol) Tunnel {
-	return &tunnelAdapter{
-		conn:     conn,
-		protocol: protocol,
-		inbound:  make(chan []byte),
-		errors:   make(chan error, 100),
+func (t *tunnelAdapter) Read(p []byte) (int, error) {
+	// Serve any pending data first
+	if len(t.pending) > 0 {
+		n := copy(p, t.pending)
+		t.pending = t.pending[n:]
+		return n, nil
 	}
-}
 
-func (a *tunnelAdapter) Errors() <-chan error {
-	return a.errors
-}
-
-// Start begins reading inbound messages in a separate goroutine.
-func (a *tunnelAdapter) Start(ctx context.Context) {
-	ctx, a.cancel = context.WithCancel(ctx)
-	a.writeCtx = ctx
-	go a.readLoop(ctx)
-}
-
-// Stop signals the reading goroutine to stop and closes the connection.
-func (a *tunnelAdapter) Stop() {
-	if a.cancel != nil {
-		a.cancel()
-		a.cancel = nil
-	}
-	// Do not close a.inbound or a.errors here; let readLoop handle it.
-}
-
-// readLoop continuously reads messages until error or context cancellation.
-func (a *tunnelAdapter) readLoop(ctx context.Context) {
-	eg, rCtx := errgroup.WithContext(ctx)
-
-	// Handle incoming messages
-	eg.Go(func() error {
-		defer close(a.inbound)
-		return a.inboundHandler(rCtx)
-	})
-
-	// Forward data from protocol to adapter
-	eg.Go(func() error {
-		for {
-			select {
-			case <-rCtx.Done():
-				return rCtx.Err()
-			case data, ok := <-a.protocol.DataChannel():
-				if !ok {
-					return nil
-				}
-				select {
-				case a.inbound <- data:
-				case <-rCtx.Done():
-					return rCtx.Err()
-				}
-			}
+	select {
+	case data, ok := <-t.inbound:
+		if !ok {
+			return 0, io.EOF
 		}
-	})
-	if err := eg.Wait(); err != nil && err != context.Canceled && err != io.EOF {
-		fmt.Println("readLoop error:", err)
-	}
-}
-
-// inboundHandler parses each incoming message and sends it to the inbound channel.
-func (a *tunnelAdapter) inboundHandler(ctx context.Context) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		n := copy(p, data)
+		// Save any leftover bytes for the next Read
+		if n < len(data) {
+			t.pending = data[n:]
 		}
-		_, msg, err := a.conn.Read(ctx)
-		if errors.Is(err, context.Canceled) || websocket.CloseStatus(err) == websocket.StatusNormalClosure {
-			return nil
-		} else if err != nil {
-			// Gracefully handle Postgres connection closed (status 4010)
-			if websocket.CloseStatus(err) == 4010 {
-				return io.EOF
-			}
-			return fmt.Errorf("error while reading message: %w", err)
-		}
-		err = a.parseSubprotocolMessage(ctx, msg)
-		if err != nil {
-			return err
-		}
-	}
-}
-
-// parseSubprotocolMessage handles framing or subprotocol tags, and dispatches data as needed.
-func (a *tunnelAdapter) parseSubprotocolMessage(ctx context.Context, msg []byte) error {
-	return a.protocol.HandleMessage(ctx, msg)
-}
-
-// inboundAck sends a subprotocol ACK with the total inbound length.
-func (a *tunnelAdapter) inboundAck(ctx context.Context, length uint64) error {
-	frame := a.protocol.CreateAckFrame(length)
-	if err := a.conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
-		return fmt.Errorf("unable to write inbound ack: %w", err)
-	}
-	return nil
-}
-
-// Read implements io.Reader by pulling from the inbound channel.
-func (a *tunnelAdapter) Read(p []byte) (int, error) {
-	msg, ok := <-a.inbound
-	if !ok {
+		return n, nil
+	case <-t.closed:
 		return 0, io.EOF
 	}
-	copied := copy(p, msg)
-	return copied, nil
 }
 
-// Write implements io.Writer by splitting data into frames and sending them.
-func (a *tunnelAdapter) Write(p []byte) (int, error) {
-	frame := a.protocol.CreateDataFrame(p)
-	if err := a.conn.Write(a.writeCtx, websocket.MessageBinary, frame); err != nil {
-		return 0, fmt.Errorf("write failed: %w", err)
+func (t *tunnelAdapter) Write(p []byte) (int, error) {
+	// Implement protocol-specific write logic here.
+	// For example, wrap p in a protocol frame and send via t.conn.
+	err := t.protocol.SendDataFrame(t.conn, p)
+	if err != nil {
+		return 0, err
 	}
 	return len(p), nil
 }
 
-// Close is part of io.Closer. Stop the read loop, then close the channel.
-func (a *tunnelAdapter) Close() error {
-	a.Stop()
-	return nil
+func (t *tunnelAdapter) Close() error {
+	close(t.closed)
+	return t.conn.Close(websocket.StatusNormalClosure, "tunnel closed")
 }
 
-type tunnelManager struct {
-	Target        IapTunnelTarget
-	auth          TokenProvider
-	errors        chan error
-	currentTunnel Tunnel
-	mu            sync.Mutex // protect currentTunnel access
+// Start launches goroutines to handle inbound websocket messages and protocol parsing.
+func (t *tunnelAdapter) Start(ctx context.Context) {
+	go func() {
+		defer close(t.inbound)
+		for {
+			_, msg, err := t.conn.Read(ctx)
+			if err != nil {
+				t.errors <- err
+				return
+			}
+			// Parse protocol and push data frames to t.inbound
+			data, err := t.protocol.ParseDataFrame(msg)
+			if err != nil {
+				t.errors <- err
+				return
+			}
+			t.inbound <- data
+		}
+	}()
 }
 
-func NewTunnelManager(target IapTunnelTarget) TunnelManager {
-	return &tunnelManager{
-		Target: target,
-		// auth:      auth,
+// TunnelManager manages the lifecycle of a local TCP listener and IAP tunnel connections.
+type TunnelManager struct {
+	target TunnelTarget
+	auth   TokenProvider
+
+	mu      sync.Mutex
+	errors  chan error
+	running bool
+}
+
+// NewTunnelManager creates a new TunnelManager.
+func NewTunnelManager(target TunnelTarget, auth TokenProvider) *TunnelManager {
+	return &TunnelManager{
+		target: target,
+		auth:   auth,
 		errors: make(chan error, 100),
 	}
 }
 
-func (m *tunnelManager) Errors() <-chan error {
+// Errors returns a channel for asynchronous error reporting.
+func (m *TunnelManager) Errors() <-chan error {
 	return m.errors
 }
 
-func (m *tunnelManager) SetTokenProvider(prov TokenProvider) {
-	m.auth = prov
-}
-
-// StartSocket dial a WebSocket connection to the target and return the connection.
-func (m *tunnelManager) StartSocket(ctx context.Context) (*websocket.Conn, error) {
-	var err error
-	if m.auth == nil {
-		src, err := google.DefaultTokenSource(ctx, oauthsvc.UserinfoEmailScope)
-		if err != nil {
-			return nil, fmt.Errorf("unable to acquire token source: %w", err)
-		}
-		m.SetTokenProvider(NewOAuthTokenProvider(src))
-	}
-
-	u, err := CreateWebSocketConnectURL(m.Target, true)
-
-	headers, err := m.auth.GetHeaders()
-	if err != nil {
-		return nil, fmt.Errorf("unable to construct headers: %w", err)
-	}
-
-	opts := &websocket.DialOptions{
-		HTTPHeader:   headers,
-		Subprotocols: []string{SUBPROTOCOL_NAME},
-	}
-
-	conn, _, err := websocket.Dial(ctx, u, opts)
-	if err != nil {
-		return nil, fmt.Errorf("unable to dial WebSocket: %w", err)
-	}
-	return conn, nil
-}
-
-// StartTunnel starts a single WebSocket tunnel and returns an io.ReadWriteCloser for data flow.
-func (m *tunnelManager) StartTunnel(ctx context.Context, conn *websocket.Conn) (Tunnel, error) {
-	adapter := NewTunnelAdapter(conn, NewIAPTunnelProtocol())
-	adapter.Start(ctx)
-
+// Serve starts accepting connections on the provided listener and proxies them via IAP.
+func (m *TunnelManager) Serve(ctx context.Context, lis net.Listener) error {
 	m.mu.Lock()
-	if m.currentTunnel != nil {
-		m.currentTunnel.Stop()
+	if m.running {
+		m.mu.Unlock()
+		return errors.New("tunnel manager already running")
 	}
-	m.currentTunnel = adapter
+	m.running = true
 	m.mu.Unlock()
 
-	return adapter, nil
-}
-
-// Serve accepts a user-provided net.Listener and handles incoming connections.
-func (m *tunnelManager) Serve(ctx context.Context, lis net.Listener) error {
-	fmt.Printf("[IAP Tunnel] Serving on %s\n", lis.Addr())
 	defer func() {
-		fmt.Println("[IAP Tunnel] Listener closed, shutting down Serve loop.")
+		m.mu.Lock()
+		m.running = false
+		m.mu.Unlock()
 	}()
+
+	fmt.Printf("[IAP Tunnel] Serving on %s\n", lis.Addr())
+	defer fmt.Println("[IAP Tunnel] Listener closed, shutting down Serve loop.")
+
 	for {
 		conn, err := lis.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
-				fmt.Println("[IAP Tunnel] Listener closed or context cancelled, exiting Serve loop.")
 				return nil
 			}
 			select {
@@ -267,174 +190,77 @@ func (m *tunnelManager) Serve(ctx context.Context, lis net.Listener) error {
 			}
 			continue
 		}
-
-		go func(conn net.Conn) {
-			defer func() {
-				conn.Close()
-				fmt.Println("[IAP Tunnel] Closed accepted connection.")
-			}()
-
-			websocketConn, err := m.StartSocket(ctx)
-			if err != nil {
-				fmt.Printf("[IAP Tunnel] Failed to start websocket: %v\n", err)
-				return
-			}
-			defer func() {
-				websocketConn.Close(websocket.StatusNormalClosure, "connection handler done")
-				fmt.Println("[IAP Tunnel] Websocket connection closed.")
-			}()
-
-			if tcpConn, ok := conn.(*net.TCPConn); ok {
-				tcpConn.SetKeepAlive(true)
-				tcpConn.SetKeepAlivePeriod(30 * time.Second)
-			}
-
-			tunnel, err := m.StartTunnel(ctx, websocketConn)
-			if err != nil {
-				fmt.Printf("[IAP Tunnel] Failed to start tunnel: %v\n", err)
-				return
-			}
-			defer func() {
-				tunnel.Close()
-				fmt.Println("[IAP Tunnel] Tunnel closed gracefully.")
-			}()
-
-			if err := handleConnection(ctx, conn, tunnel); err != nil {
-				select {
-				case m.errors <- fmt.Errorf("connection error: %w", err):
-				default:
-				}
-			}
-		}(conn)
+		go m.handleConn(ctx, conn)
 	}
 }
 
-// // StartProxy listens on LocalPort, creates a new tunnel, then copies data in both directions.
-// func (m *tunnelManager) StartProxy(ctx context.Context) error {
-// 	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", m.LocalPort))
-// 	if err != nil {
-// 		return fmt.Errorf("unable to listen on port %d: %w", m.LocalPort, err)
-// 	}
-// 	fmt.Printf("Listening on localhost:%d\n", m.LocalPort)
-// 	defer lis.Close()
+// handleConn proxies a single TCP connection via IAP WebSocket.
+func (m *TunnelManager) handleConn(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+	fmt.Printf("[IAP Tunnel] Accepted connection from %s\n", conn.RemoteAddr())
 
-// 	for {
-// 		conn, err := lis.Accept()
-// 		if err != nil {
-// 			if errors.Is(err, net.ErrClosed) {
-// 				return nil
-// 			}
-// 			continue
-// 		}
+	wsConn, _, err := m.startWebSocket(ctx)
+	if err != nil {
+		fmt.Printf("[IAP Tunnel] Failed to start websocket: %v\n", err)
+		return
+	}
+	defer wsConn.Close(websocket.StatusNormalClosure, "handler done")
 
-// 		go func(conn net.Conn) {
-// 			defer conn.Close()
+	tunnel := NewTunnelAdapter(wsConn, NewIAPTunnelProtocol())
+	tunnel.Start(ctx)
+	defer tunnel.Close()
 
-// 			websocketConn, err := m.StartSocket(ctx)
-// 			if err != nil {
-// 				fmt.Printf("Failed to start websocket: %v\n", err)
-// 				return
-// 			}
-// 			defer websocketConn.Close(websocket.StatusNormalClosure, "")
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
 
-// 			tcpConn := conn.(*net.TCPConn)
-// 			tcpConn.SetKeepAlive(true)
-// 			tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	if err := proxyBidirectional(ctx, conn, tunnel); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+		fmt.Printf("[IAP Tunnel] Proxy error: %v\n", err)
+	}
+	fmt.Printf("[IAP Tunnel] Closed connection from %s\n", conn.RemoteAddr())
+}
 
-// 			tunnel, err := m.StartTunnel(ctx, websocketConn)
-// 			if err != nil {
-// 				fmt.Printf("Failed to start tunnel: %v\n", err)
-// 				return
-// 			}
-// 			defer tunnel.Close()
-
-// 			if err := handleConnection(ctx, conn, tunnel); err != nil {
-// 				select {
-// 				case m.errors <- fmt.Errorf("connection error: %w", err):
-// 				default:
-// 				}
-// 			}
-// 		}(conn)
-// 	}
-// }
-
-// handleConnection uses an errgroup to copy data in both directions,
-// returning an error if any copy fails.
-func handleConnection(ctx context.Context, conn net.Conn, tunnel io.ReadWriteCloser) error {
-	g, gCtx := errgroup.WithContext(ctx)
-
-	// Create a done channel to signal completion
-	done := make(chan struct{})
-	defer close(done)
-
-	g.Go(func() error {
-		defer func() {
-			conn.(*net.TCPConn).CloseRead()
-			select {
-			case done <- struct{}{}:
-			default:
-			}
-		}()
-		_, err := io.Copy(conn, tunnel)
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("copy from tunnel failed: %w", err)
+// startWebSocket establishes a websocket connection to the IAP tunnel backend.
+func (m *TunnelManager) startWebSocket(ctx context.Context) (*websocket.Conn, *http.Response, error) {
+	if m.auth == nil {
+		src, err := google.DefaultTokenSource(ctx, oauthsvc.UserinfoEmailScope)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to acquire token source: %w", err)
 		}
-		return nil
-	})
+		m.auth = NewOAuthTokenProvider(src)
+	}
+	u, err := CreateWebSocketConnectURL(m.target, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	headers, err := m.auth.GetHeaders()
+	if err != nil {
+		return nil, nil, err
+	}
+	opts := &websocket.DialOptions{
+		HTTPHeader:   headers,
+		Subprotocols: []string{SUBPROTOCOL_NAME},
+	}
+	return websocket.Dial(ctx, u, opts)
+}
 
+// proxyBidirectional copies data in both directions until either side closes.
+func proxyBidirectional(ctx context.Context, a, b io.ReadWriteCloser) error {
+	g, _ := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		defer func() {
-			conn.(*net.TCPConn).CloseWrite()
-			select {
-			case done <- struct{}{}:
-			default:
-			}
-		}()
-		_, err := io.Copy(tunnel, conn)
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("copy to tunnel failed: %w", err)
-		}
-		return nil
-	})
-
-	// Wait for either context cancellation or copy completion
-	select {
-	case <-gCtx.Done():
-		return gCtx.Err()
-	case <-done:
-		// One of the copies completed, wait for cleanup
-		err := g.Wait()
-		if errors.Is(err, io.EOF) || isConnectionReset(err) {
-			return nil
+		_, err := io.Copy(a, b)
+		if err != nil {
+			fmt.Printf("[IAP Tunnel] Error copying from a to b: %v\n", err)
 		}
 		return err
-	}
-}
-
-func (m *tunnelManager) Stop() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.currentTunnel != nil {
-		fmt.Println("[IAP Tunnel] Stopping current tunnel...")
-		m.currentTunnel.Stop()
-		// Attempt to close the underlying websocket connection if possible
-		if adapter, ok := m.currentTunnel.(*tunnelAdapter); ok && adapter.conn != nil {
-			fmt.Println("[IAP Tunnel] Closing underlying websocket connection...")
-			adapter.conn.Close(websocket.StatusNormalClosure, "tunnel manager stopped")
+	})
+	g.Go(func() error {
+		_, err := io.Copy(b, a)
+		if err != nil {
+			fmt.Printf("[IAP Tunnel] Error copying from b to a: %v\n", err)
 		}
-		m.currentTunnel = nil
-		fmt.Println("[IAP Tunnel] Tunnel stopped gracefully.")
-	} else {
-		fmt.Println("[IAP Tunnel] No active tunnel to stop.")
-	}
-	return nil
-}
-
-func isConnectionReset(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "connection reset by peer") ||
-		strings.Contains(err.Error(), "broken pipe")
+		return err
+	})
+	return g.Wait()
 }
