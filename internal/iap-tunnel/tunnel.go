@@ -79,38 +79,7 @@ func (a *tunnelAdapter) Stop() {
 		a.cancel()
 		a.cancel = nil
 	}
-
-	// Close channels first
-	select {
-	case <-a.inbound:
-		// already closed
-	default:
-		close(a.inbound)
-	}
-
-	// Then close websocket with proper shutdown
-	if a.conn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-		defer cancel()
-
-		if err := a.conn.Close(websocket.StatusNormalClosure, ""); err != nil {
-			fmt.Printf("Error closing websocket: %v\n", err)
-		}
-
-		// Wait for close frame
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if _, _, err := a.conn.Read(ctx); err != nil {
-					if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
-						return
-					}
-				}
-			}
-		}
-	}
+	// Do not close a.inbound or a.errors here; let readLoop handle it.
 }
 
 // readLoop continuously reads messages until error or context cancellation.
@@ -141,7 +110,7 @@ func (a *tunnelAdapter) readLoop(ctx context.Context) {
 			}
 		}
 	})
-	if err := eg.Wait(); err != nil && err != context.Canceled {
+	if err := eg.Wait(); err != nil && err != context.Canceled && err != io.EOF {
 		fmt.Println("readLoop error:", err)
 	}
 }
@@ -158,6 +127,10 @@ func (a *tunnelAdapter) inboundHandler(ctx context.Context) error {
 		if errors.Is(err, context.Canceled) || websocket.CloseStatus(err) == websocket.StatusNormalClosure {
 			return nil
 		} else if err != nil {
+			// Gracefully handle Postgres connection closed (status 4010)
+			if websocket.CloseStatus(err) == 4010 {
+				return io.EOF
+			}
 			return fmt.Errorf("error while reading message: %w", err)
 		}
 		err = a.parseSubprotocolMessage(ctx, msg)
@@ -207,7 +180,6 @@ func (a *tunnelAdapter) Close() error {
 }
 
 type tunnelManager struct {
-	LocalPort     int
 	Target        IapTunnelTarget
 	auth          TokenProvider
 	errors        chan error
@@ -215,10 +187,9 @@ type tunnelManager struct {
 	mu            sync.Mutex // protect currentTunnel access
 }
 
-func NewTunnelManager(localPort int, target IapTunnelTarget) TunnelManager {
+func NewTunnelManager(target IapTunnelTarget) TunnelManager {
 	return &tunnelManager{
-		LocalPort: localPort,
-		Target:    target,
+		Target: target,
 		// auth:      auth,
 		errors: make(chan error, 100),
 	}
@@ -277,61 +248,56 @@ func (m *tunnelManager) StartTunnel(ctx context.Context, conn *websocket.Conn) (
 	return adapter, nil
 }
 
-// StartProxy listens on LocalPort, creates a new tunnel, then copies data in both directions.
-func (m *tunnelManager) StartProxy(ctx context.Context) error {
-	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", m.LocalPort))
-	if err != nil {
-		return fmt.Errorf("unable to listen on port %d: %w", m.LocalPort, err)
-	}
-	defer lis.Close()
-
-	var websocketConn *websocket.Conn
+// Serve accepts a user-provided net.Listener and handles incoming connections.
+func (m *tunnelManager) Serve(ctx context.Context, lis net.Listener) error {
+	fmt.Printf("[IAP Tunnel] Serving on %s\n", lis.Addr())
 	defer func() {
-		if websocketConn != nil {
-			websocketConn.Close(websocket.StatusNormalClosure, "")
-		}
+		fmt.Println("[IAP Tunnel] Listener closed, shutting down Serve loop.")
 	}()
-
 	for {
-		if websocketConn == nil {
-			var err error
-			websocketConn, err = m.StartSocket(ctx)
-			if err != nil {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(time.Second * 5):
-					continue
-				}
-			}
-		}
-
 		conn, err := lis.Accept()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
+			if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+				fmt.Println("[IAP Tunnel] Listener closed or context cancelled, exiting Serve loop.")
 				return nil
 			}
-			if websocketConn != nil {
-				websocketConn.Close(websocket.StatusNormalClosure, "")
-				websocketConn = nil
+			select {
+			case m.errors <- fmt.Errorf("accept error: %w", err):
+			default:
 			}
 			continue
 		}
 
-		tcpConn := conn.(*net.TCPConn)
-		tcpConn.SetKeepAlive(true)
-		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		go func(conn net.Conn) {
+			defer func() {
+				conn.Close()
+				fmt.Println("[IAP Tunnel] Closed accepted connection.")
+			}()
 
-		tunnel, err := m.StartTunnel(ctx, websocketConn)
-		if err != nil {
-			conn.Close()
-			websocketConn = nil
-			continue
-		}
+			websocketConn, err := m.StartSocket(ctx)
+			if err != nil {
+				fmt.Printf("[IAP Tunnel] Failed to start websocket: %v\n", err)
+				return
+			}
+			defer func() {
+				websocketConn.Close(websocket.StatusNormalClosure, "connection handler done")
+				fmt.Println("[IAP Tunnel] Websocket connection closed.")
+			}()
 
-		go func(conn net.Conn, tunnel Tunnel) {
-			defer conn.Close()
-			defer tunnel.Close()
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				tcpConn.SetKeepAlive(true)
+				tcpConn.SetKeepAlivePeriod(30 * time.Second)
+			}
+
+			tunnel, err := m.StartTunnel(ctx, websocketConn)
+			if err != nil {
+				fmt.Printf("[IAP Tunnel] Failed to start tunnel: %v\n", err)
+				return
+			}
+			defer func() {
+				tunnel.Close()
+				fmt.Println("[IAP Tunnel] Tunnel closed gracefully.")
+			}()
 
 			if err := handleConnection(ctx, conn, tunnel); err != nil {
 				select {
@@ -339,9 +305,58 @@ func (m *tunnelManager) StartProxy(ctx context.Context) error {
 				default:
 				}
 			}
-		}(conn, tunnel)
+		}(conn)
 	}
 }
+
+// // StartProxy listens on LocalPort, creates a new tunnel, then copies data in both directions.
+// func (m *tunnelManager) StartProxy(ctx context.Context) error {
+// 	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", m.LocalPort))
+// 	if err != nil {
+// 		return fmt.Errorf("unable to listen on port %d: %w", m.LocalPort, err)
+// 	}
+// 	fmt.Printf("Listening on localhost:%d\n", m.LocalPort)
+// 	defer lis.Close()
+
+// 	for {
+// 		conn, err := lis.Accept()
+// 		if err != nil {
+// 			if errors.Is(err, net.ErrClosed) {
+// 				return nil
+// 			}
+// 			continue
+// 		}
+
+// 		go func(conn net.Conn) {
+// 			defer conn.Close()
+
+// 			websocketConn, err := m.StartSocket(ctx)
+// 			if err != nil {
+// 				fmt.Printf("Failed to start websocket: %v\n", err)
+// 				return
+// 			}
+// 			defer websocketConn.Close(websocket.StatusNormalClosure, "")
+
+// 			tcpConn := conn.(*net.TCPConn)
+// 			tcpConn.SetKeepAlive(true)
+// 			tcpConn.SetKeepAlivePeriod(30 * time.Second)
+
+// 			tunnel, err := m.StartTunnel(ctx, websocketConn)
+// 			if err != nil {
+// 				fmt.Printf("Failed to start tunnel: %v\n", err)
+// 				return
+// 			}
+// 			defer tunnel.Close()
+
+// 			if err := handleConnection(ctx, conn, tunnel); err != nil {
+// 				select {
+// 				case m.errors <- fmt.Errorf("connection error: %w", err):
+// 				default:
+// 				}
+// 			}
+// 		}(conn)
+// 	}
+// }
 
 // handleConnection uses an errgroup to copy data in both directions,
 // returning an error if any copy fails.
@@ -397,20 +412,21 @@ func handleConnection(ctx context.Context, conn net.Conn, tunnel io.ReadWriteClo
 }
 
 func (m *tunnelManager) Stop() error {
-	// Close any active connections and cleanup resources
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.currentTunnel != nil {
+		fmt.Println("[IAP Tunnel] Stopping current tunnel...")
 		m.currentTunnel.Stop()
+		// Attempt to close the underlying websocket connection if possible
+		if adapter, ok := m.currentTunnel.(*tunnelAdapter); ok && adapter.conn != nil {
+			fmt.Println("[IAP Tunnel] Closing underlying websocket connection...")
+			adapter.conn.Close(websocket.StatusNormalClosure, "tunnel manager stopped")
+		}
 		m.currentTunnel = nil
-	}
-	// Ensure all channels are closed
-	select {
-	case <-m.errors:
-		// Channel already closed
-	default:
-		close(m.errors)
+		fmt.Println("[IAP Tunnel] Tunnel stopped gracefully.")
+	} else {
+		fmt.Println("[IAP Tunnel] No active tunnel to stop.")
 	}
 	return nil
 }

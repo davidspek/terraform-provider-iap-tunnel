@@ -3,6 +3,7 @@ package iap_tunnel
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 
 	"github.com/coder/websocket"
@@ -28,7 +29,8 @@ type TunnelProtocol interface {
 
 // TunnelManager handles tunnel lifecycle
 type TunnelManager interface {
-	StartProxy(context.Context) error
+	// StartProxy(context.Context) error
+	Serve(context.Context, net.Listener) error
 	StartTunnel(context.Context, *websocket.Conn) (Tunnel, error)
 	Errors() <-chan error
 	Stop() error

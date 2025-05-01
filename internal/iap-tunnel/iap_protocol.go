@@ -13,6 +13,9 @@ type IAPTunnelProtocol struct {
 	outboundLock    sync.Mutex
 	dataChannel     chan []byte
 	errors          chan error
+	connected       bool
+	sid             uint64
+	mu              sync.RWMutex
 }
 
 func NewIAPTunnelProtocol() *IAPTunnelProtocol {
@@ -56,11 +59,15 @@ func (p *IAPTunnelProtocol) ValidateMessage(msg []byte) error {
 }
 
 func (p *IAPTunnelProtocol) handleConnectSuccess(msg []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	sid, _, err := p.ExtractSubprotocolConnectSuccessSid(msg)
 	if err != nil {
 		return fmt.Errorf("unable to extract connect success SID: %w", err)
 	}
-	p.totalInboundLen = sid
+	p.connected = true
+	p.sid = sid
 	return nil
 }
 
@@ -77,7 +84,22 @@ func (p *IAPTunnelProtocol) handleData(ctx context.Context, msg []byte) error {
 	if err != nil {
 		return fmt.Errorf("unable to extract data: %w", err)
 	}
-	p.dataChannel <- data
+
+	p.totalInboundLen += uint64(len(data))
+
+	// Send ACK after receiving enough data
+	if p.totalInboundLen > 2*SUBPROTOCOL_MAX_DATA_FRAME_SIZE {
+		select {
+		case p.dataChannel <- p.CreateAckFrame(p.totalInboundLen):
+		default:
+		}
+	}
+
+	select {
+	case p.dataChannel <- data:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	return nil
 }
 
