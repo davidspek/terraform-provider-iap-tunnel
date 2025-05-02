@@ -5,21 +5,28 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/coder/websocket"
 )
 
-type IAPTunnelProtocol struct {
-	mu    sync.RWMutex
-	sid   uint64
-	ready chan struct{}
+type IAPTunnelProtocol struct{}
+
+// TunnelProtocol defines the protocol-specific operations
+type TunnelProtocol interface {
+	ParseFrame(msg []byte) (uint16, []byte, error)
+	SendDataFrame(conn *websocket.Conn, data []byte) error
+	SendAckFrame(conn *websocket.Conn, length uint64) error
+	SendFrame(conn *websocket.Conn, data []byte) error
+	ExtractSubprotocolTag(data []byte) (uint16, []byte, error)
+	ExtractSubprotocolConnectSuccessSid(data []byte) (uint64, []byte, error)
+	ExtractSubprotocolAck(data []byte) (uint64, []byte, error)
+	ExtractData(data []byte) ([]byte, []byte, error)
+	CreateDataFrame(data []byte) []byte
+	CreateAckFrame(length uint64) []byte
 }
 
-func NewIAPTunnelProtocol(ready chan struct{}) *IAPTunnelProtocol {
-	return &IAPTunnelProtocol{
-		ready: ready,
-	}
+func NewIAPTunnelProtocol() TunnelProtocol {
+	return &IAPTunnelProtocol{}
 }
 
 // SendDataFrame sends a data frame over the websocket connection using the IAP tunnel protocol.
@@ -64,29 +71,16 @@ func (p *IAPTunnelProtocol) SendFrame(conn *websocket.Conn, data []byte) error {
 	return nil
 }
 
-func (p *IAPTunnelProtocol) ParseDataFrame(msg []byte) ([]byte, error) {
+func (p *IAPTunnelProtocol) ParseFrame(msg []byte) (uint16, []byte, error) {
 	if err := p.ValidateMessage(msg); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 
-	subprotocolTag, msg, err := p.ExtractSubprotocolTag(msg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to extract subprotocol tag: %w", err)
-	}
-
-	switch subprotocolTag {
-	case SUBPROTOCOL_TAG_CONNECT_SUCCESS_SID:
-		fmt.Println("Received Connect Success SID frame")
-		return p.handleConnectSuccess(msg)
-	case SUBPROTOCOL_TAG_ACK:
-		fmt.Println("Received ACK frame")
-		return p.handleAck(msg)
-	case SUBPROTOCOL_TAG_DATA:
-		fmt.Println("Received data frame")
-		return p.handleData(msg)
-	default:
-		return nil, errors.New("unknown subprotocol tag")
-	}
+	// tag, msg, err = p.ExtractSubprotocolTag(msg)
+	// if err != nil {
+	// 	return 0, fmt.Errorf("unable to extract subprotocol tag: %w", err)
+	// }
+	return p.ExtractSubprotocolTag(msg)
 }
 
 func (p *IAPTunnelProtocol) ValidateMessage(msg []byte) error {
@@ -94,41 +88,6 @@ func (p *IAPTunnelProtocol) ValidateMessage(msg []byte) error {
 		return errors.New("inbound message too short for subprotocol tag")
 	}
 	return nil
-}
-
-func (p *IAPTunnelProtocol) handleConnectSuccess(msg []byte) ([]byte, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	sid, _, err := p.ExtractSubprotocolConnectSuccessSid(msg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to extract connect success SID: %w", err)
-	}
-	p.sid = sid
-	// Signal readiness
-	select {
-	case <-p.ready:
-		// already closed
-	default:
-		close(p.ready)
-	}
-	return nil, nil
-}
-
-func (p *IAPTunnelProtocol) handleAck(msg []byte) ([]byte, error) {
-	_, _, err := p.ExtractSubprotocolAck(msg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to extract ack: %w", err)
-	}
-	return nil, nil
-}
-
-func (p *IAPTunnelProtocol) handleData(msg []byte) ([]byte, error) {
-	data, _, err := p.ExtractData(msg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to extract data: %w", err)
-	}
-	return data, nil
 }
 
 // ExtractSubprotocolTag extracts a 16-bit tag.

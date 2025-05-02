@@ -53,31 +53,31 @@ type TunnelTarget struct {
 	DestGroup   string
 }
 
-// NewTunnelAdapter creates a TunnelAdapter that implements io.ReadWriteCloser over the IAP websocket connection.
-// protocol should implement your IAP tunnel protocol logic.
-func NewTunnelAdapter(wsConn *websocket.Conn) *TunnelAdapter {
-	ready := make(chan struct{})
-	protocol := NewIAPTunnelProtocol(ready)
-	return &TunnelAdapter{
-		conn:     wsConn,
-		protocol: protocol,
-		inbound:  make(chan []byte, 100),
-		errors:   make(chan error, 100),
-		closed:   make(chan struct{}),
-		ready:    ready,
-	}
-}
-
 // TunnelAdapter implements io.ReadWriteCloser for the tunnel.
 type TunnelAdapter struct {
 	conn            *websocket.Conn
-	protocol        *IAPTunnelProtocol
+	protocol        TunnelProtocol
+	target          TunnelTarget
 	inbound         chan []byte
 	totalInboundLen uint64
 	pending         []byte
 	errors          chan error
 	closed          chan struct{}
 	ready           chan struct{}
+}
+
+// NewTunnelAdapter creates a TunnelAdapter that implements io.ReadWriteCloser over the IAP websocket connection.
+// protocol should implement your IAP tunnel protocol logic.
+func NewTunnelAdapter(wsConn *websocket.Conn, target TunnelTarget) *TunnelAdapter {
+	return &TunnelAdapter{
+		conn:     wsConn,
+		protocol: NewIAPTunnelProtocol(),
+		target:   target,
+		inbound:  make(chan []byte, 100),
+		errors:   make(chan error, 100),
+		closed:   make(chan struct{}),
+		ready:    make(chan struct{}),
+	}
 }
 
 func (t *TunnelAdapter) Read(p []byte) (int, error) {
@@ -122,32 +122,84 @@ func (t *TunnelAdapter) Start(ctx context.Context) {
 	go func() {
 		defer close(t.inbound)
 		defer close(t.errors)
+		var sid uint64
+		var ackBytes uint64
+		var wsConn = t.conn
+
+		fmt.Println("ACK bytes:", ackBytes)
+		// var err error
 		for {
-			_, msg, err := t.conn.Read(ctx)
+			_, msg, err := wsConn.Read(ctx)
 			if err != nil {
+				// Attempt reconnect if not context cancellation
+				if ctx.Err() == nil && sid != 0 {
+					reconnectURL, _ := CreateWebSocketReconnectURL(
+						t.target, sid, ackBytes, true,
+					)
+					wsConn, _, err = websocket.Dial(ctx, reconnectURL, nil)
+					if err != nil {
+						t.errors <- fmt.Errorf("reconnect failed: %w", err)
+						return
+					}
+					continue
+				}
 				t.errors <- err
 				return
 			}
 			// Parse protocol and push data frames to t.inbound
-			data, err := t.protocol.ParseDataFrame(msg)
+			frameType, parsedMsg, err := t.protocol.ParseFrame(msg)
 			if err != nil {
 				t.errors <- err
 				return
 			}
-			if data != nil {
-				t.inbound <- data
-				t.totalInboundLen += uint64(len(data))
-				// Send ACK after receiving enough data
-				if t.totalInboundLen > 2*SUBPROTOCOL_MAX_DATA_FRAME_SIZE {
-					// Send ACK frame
-					err := t.protocol.SendAckFrame(t.conn, t.totalInboundLen)
-					if err != nil {
-						t.errors <- err
-						return
-					}
-					// Reset counter or adjust as needed
-					t.totalInboundLen = 0
+			switch frameType {
+			case SUBPROTOCOL_TAG_CONNECT_SUCCESS_SID:
+				fmt.Println("Received Connect Success SID frame")
+				sid, _, err = t.protocol.ExtractSubprotocolConnectSuccessSid(parsedMsg)
+				if err != nil {
+					t.errors <- fmt.Errorf("unable to extract connect success SID: %w", err)
 				}
+
+				select {
+				case <-t.ready:
+					// already closed
+				default:
+					close(t.ready)
+				}
+			case SUBPROTOCOL_TAG_RECONNECT_SUCCESS_ACK:
+				fmt.Println("Received RECONNECT_SUCCESS_ACK frame")
+				ackBytes, _, err = t.protocol.ExtractSubprotocolAck(parsedMsg)
+				if err != nil {
+					t.errors <- fmt.Errorf("unable to extract ack from reconnect success: %w", err)
+				}
+			case SUBPROTOCOL_TAG_ACK:
+				fmt.Println("Received ACK frame")
+				ackBytes, _, err = t.protocol.ExtractSubprotocolAck(parsedMsg)
+				if err != nil {
+					t.errors <- fmt.Errorf("unable to extract ack: %w", err)
+				}
+			case SUBPROTOCOL_TAG_DATA:
+				fmt.Println("Received data frame")
+				data, _, err := t.protocol.ExtractData(parsedMsg)
+				if err != nil {
+					t.errors <- fmt.Errorf("unable to extract data: %w", err)
+				}
+				if data != nil {
+					t.inbound <- data
+					t.totalInboundLen += uint64(len(data))
+					// Send ACK after receiving enough data
+					if t.totalInboundLen > 2*SUBPROTOCOL_MAX_DATA_FRAME_SIZE {
+						// Send ACK frame
+						err := t.protocol.SendAckFrame(t.conn, t.totalInboundLen)
+						if err != nil {
+							t.errors <- err
+						}
+						// Reset counter or adjust as needed
+						t.totalInboundLen = 0
+					}
+				}
+			default:
+				fmt.Printf("Unknown frame type: %d\n", frameType)
 			}
 		}
 	}()
@@ -230,7 +282,7 @@ func (m *TunnelManager) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	defer wsConn.Close(websocket.StatusNormalClosure, "handler done")
 
-	tunnel := NewTunnelAdapter(wsConn)
+	tunnel := NewTunnelAdapter(wsConn, m.target)
 	m.mu.Lock()
 	m.lastTunnel = tunnel
 	m.mu.Unlock()
