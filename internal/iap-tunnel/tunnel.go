@@ -55,10 +55,10 @@ type TunnelTarget struct {
 
 // NewTunnelAdapter creates a TunnelAdapter that implements io.ReadWriteCloser over the IAP websocket connection.
 // protocol should implement your IAP tunnel protocol logic.
-func NewTunnelAdapter(wsConn *websocket.Conn) *tunnelAdapter {
+func NewTunnelAdapter(wsConn *websocket.Conn) *TunnelAdapter {
 	ready := make(chan struct{})
 	protocol := NewIAPTunnelProtocol(ready)
-	return &tunnelAdapter{
+	return &TunnelAdapter{
 		conn:     wsConn,
 		protocol: protocol,
 		inbound:  make(chan []byte, 100),
@@ -68,18 +68,19 @@ func NewTunnelAdapter(wsConn *websocket.Conn) *tunnelAdapter {
 	}
 }
 
-// tunnelAdapter implements io.ReadWriteCloser for the tunnel.
-type tunnelAdapter struct {
-	conn     *websocket.Conn
-	protocol *IAPTunnelProtocol
-	inbound  chan []byte
-	pending  []byte
-	errors   chan error
-	closed   chan struct{}
-	ready    chan struct{}
+// TunnelAdapter implements io.ReadWriteCloser for the tunnel.
+type TunnelAdapter struct {
+	conn            *websocket.Conn
+	protocol        *IAPTunnelProtocol
+	inbound         chan []byte
+	totalInboundLen uint64
+	pending         []byte
+	errors          chan error
+	closed          chan struct{}
+	ready           chan struct{}
 }
 
-func (t *tunnelAdapter) Read(p []byte) (int, error) {
+func (t *TunnelAdapter) Read(p []byte) (int, error) {
 	// Serve any pending data first
 	if len(t.pending) > 0 {
 		n := copy(p, t.pending)
@@ -103,9 +104,7 @@ func (t *tunnelAdapter) Read(p []byte) (int, error) {
 	}
 }
 
-func (t *tunnelAdapter) Write(p []byte) (int, error) {
-	// Implement protocol-specific write logic here.
-	// For example, wrap p in a protocol frame and send via t.conn.
+func (t *TunnelAdapter) Write(p []byte) (int, error) {
 	err := t.protocol.SendDataFrame(t.conn, p)
 	if err != nil {
 		return 0, err
@@ -113,13 +112,13 @@ func (t *tunnelAdapter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (t *tunnelAdapter) Close() error {
+func (t *TunnelAdapter) Close() error {
 	close(t.closed)
 	return t.conn.Close(websocket.StatusNormalClosure, "tunnel closed")
 }
 
 // Start launches goroutines to handle inbound websocket messages and protocol parsing.
-func (t *tunnelAdapter) Start(ctx context.Context) {
+func (t *TunnelAdapter) Start(ctx context.Context) {
 	go func() {
 		defer close(t.inbound)
 		defer close(t.errors)
@@ -135,13 +134,27 @@ func (t *tunnelAdapter) Start(ctx context.Context) {
 				t.errors <- err
 				return
 			}
-			t.inbound <- data
+			if data != nil {
+				t.inbound <- data
+				t.totalInboundLen += uint64(len(data))
+				// Send ACK after receiving enough data
+				if t.totalInboundLen > 2*SUBPROTOCOL_MAX_DATA_FRAME_SIZE {
+					// Send ACK frame
+					err := t.protocol.SendAckFrame(t.conn, t.totalInboundLen)
+					if err != nil {
+						t.errors <- err
+						return
+					}
+					// Reset counter or adjust as needed
+					t.totalInboundLen = 0
+				}
+			}
 		}
 	}()
 }
 
 // Ready returns a channel that signals when the tunnel is ready.
-func (t *tunnelAdapter) Ready() <-chan struct{} {
+func (t *TunnelAdapter) Ready() <-chan struct{} {
 	return t.ready
 }
 
@@ -150,7 +163,7 @@ type TunnelManager struct {
 	target TunnelTarget
 	auth   TokenProvider
 
-	lastTunnel *tunnelAdapter
+	lastTunnel *TunnelAdapter
 	mu         sync.Mutex
 	errors     chan error
 	running    bool

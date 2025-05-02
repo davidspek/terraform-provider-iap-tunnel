@@ -11,35 +11,52 @@ import (
 )
 
 type IAPTunnelProtocol struct {
-	mu              sync.RWMutex
-	totalInboundLen uint64
-	errors          chan error
-	connected       bool
-	sid             uint64
-	ready           chan struct{}
+	mu    sync.RWMutex
+	sid   uint64
+	ready chan struct{}
 }
 
 func NewIAPTunnelProtocol(ready chan struct{}) *IAPTunnelProtocol {
 	return &IAPTunnelProtocol{
-		errors: make(chan error, 100),
-		ready:  ready,
+		ready: ready,
 	}
 }
 
 // SendDataFrame sends a data frame over the websocket connection using the IAP tunnel protocol.
 func (p *IAPTunnelProtocol) SendDataFrame(conn *websocket.Conn, data []byte) error {
 	frame := p.CreateDataFrame(data)
+	err := p.SendFrame(conn, frame)
+	if err != nil {
+		return fmt.Errorf("failed to send data frame: %w", err)
+	}
+	fmt.Println("Sent data frame")
+	return nil
+}
+
+// SendAckFrame sends an ACK frame over the websocket connection using the IAP tunnel protocol.
+func (p *IAPTunnelProtocol) SendAckFrame(conn *websocket.Conn, length uint64) error {
+	frame := p.CreateAckFrame(length)
+	err := p.SendFrame(conn, frame)
+	if err != nil {
+		return fmt.Errorf("failed to send ACK frame: %w", err)
+	}
+	fmt.Println("Sent ACK frame")
+	return nil
+}
+
+// SendFrame sends a frame frame over the websocket connection using the IAP tunnel protocol.
+func (p *IAPTunnelProtocol) SendFrame(conn *websocket.Conn, data []byte) error {
 	ctx := context.Background()
 	// Use websocket.MessageBinary for binary frames
 	writer, err := conn.Writer(ctx, websocket.MessageBinary)
 	if err != nil {
 		return fmt.Errorf("failed to get websocket writer: %w", err)
 	}
-	_, err = writer.Write(frame)
-	fmt.Println("Sent data frame:", frame)
+	_, err = writer.Write(data)
+	fmt.Println("Sent frame:", data)
 	if err != nil {
 		writer.Close()
-		return fmt.Errorf("failed to write data frame: %w", err)
+		return fmt.Errorf("failed to write frame: %w", err)
 	}
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("failed to close websocket writer: %w", err)
@@ -87,7 +104,6 @@ func (p *IAPTunnelProtocol) handleConnectSuccess(msg []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract connect success SID: %w", err)
 	}
-	p.connected = true
 	p.sid = sid
 	// Signal readiness
 	select {
@@ -112,17 +128,6 @@ func (p *IAPTunnelProtocol) handleData(msg []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to extract data: %w", err)
 	}
-
-	p.totalInboundLen += uint64(len(data))
-
-	// // TODO: reimplement this properly or elsewhere
-	// // Send ACK after receiving enough data
-	// if p.totalInboundLen > 2*SUBPROTOCOL_MAX_DATA_FRAME_SIZE {
-	// 	p.SendDataFrame(nil, p.CreateAckFrame(p.totalInboundLen))
-	// 	// case p.dataChannel <- p.CreateAckFrame(p.totalInboundLen):
-	// 	// default:
-	// 	// }
-	// }
 	return data, nil
 }
 
@@ -179,8 +184,4 @@ func (p *IAPTunnelProtocol) CreateAckFrame(length uint64) []byte {
 	binary.BigEndian.PutUint16(frame[0:], SUBPROTOCOL_TAG_ACK)
 	binary.BigEndian.PutUint64(frame[SUBPROTOCOL_TAG_LEN:], length)
 	return frame
-}
-
-func (p *IAPTunnelProtocol) Errors() <-chan error {
-	return p.errors
 }

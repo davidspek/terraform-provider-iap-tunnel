@@ -43,64 +43,6 @@ func CreateWebSocketReconnectURL(t TunnelTarget, sid uint64, ackBytes uint64, ne
 	return u, nil
 }
 
-// CreateSubprotocolAckFrame packs a TAG_ACK + uint64 ack.
-func CreateSubprotocolAckFrame(ackBytes uint64) []byte {
-	buf := make([]byte, 2+8)
-	binary.BigEndian.PutUint16(buf[0:2], SUBPROTOCOL_TAG_ACK)
-	binary.BigEndian.PutUint64(buf[2:], ackBytes)
-	return buf
-}
-
-// CreateSubprotocolDataFrame packs a TAG_DATA + (data length) + data bytes.
-func CreateSubprotocolDataFrame(data []byte) []byte {
-	header := make([]byte, SUBPROTOCOL_HEADER_LEN)
-	out := make([]byte, 0, len(header)+len(data))
-	binary.BigEndian.PutUint16(header[0:2], SUBPROTOCOL_TAG_DATA)
-	binary.BigEndian.PutUint32(header[2:6], uint32(len(data)))
-	out = append(out, header...)
-	return append(out, data...)
-}
-
-// ExtractSubprotocolTag extracts a 16-bit tag.
-func ExtractSubprotocolTag(data []byte) (uint16, []byte, error) {
-	if len(data) < SUBPROTOCOL_TAG_LEN {
-		return 0, nil, errors.New("incomplete data for tag")
-	}
-	tag := binary.BigEndian.Uint16(data[:SUBPROTOCOL_TAG_LEN])
-	return tag, data[SUBPROTOCOL_TAG_LEN:], nil
-}
-
-// ExtractSubprotocolConnectSuccessSid extracts a 64-bit SID.
-func ExtractSubprotocolConnectSuccessSid(data []byte) (uint64, []byte, error) {
-	if len(data) < 8 {
-		return 0, nil, errors.New("incomplete data for connect success SID")
-	}
-	val := binary.BigEndian.Uint64(data[:8])
-	return val, data[8:], nil
-}
-
-// ExtractSubprotocolAck extracts a 64-bit Ack.
-func ExtractSubprotocolAck(data []byte) (uint64, []byte, error) {
-	if len(data) < 8 {
-		return 0, nil, errors.New("incomplete data for ack")
-	}
-	val := binary.BigEndian.Uint64(data[:8])
-	return val, data[8:], nil
-}
-
-// ExtractSubprotocolData extracts a length and then data of that length.
-func ExtractSubprotocolData(data []byte) ([]byte, []byte, error) {
-	msgLen, remainder, err := extractUint32(data)
-	if err != nil {
-		return nil, nil, err
-	}
-	if uint32(len(remainder)) < msgLen {
-		return nil, nil, errors.New("incomplete data for subprotocol payload")
-	}
-	payload := remainder[:msgLen]
-	return payload, remainder[msgLen:], nil
-}
-
 // createWebSocketURL is analogous to _CreateWebSocketUrl in Python code.
 func createWebSocketURL(endpoint string, query map[string]string, urlOverride string) string {
 	useMTLS := false // Omit context-aware logic

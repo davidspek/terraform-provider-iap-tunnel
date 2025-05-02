@@ -10,6 +10,12 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// TokenProvider abstracts authentication operations
+type TokenProvider interface {
+	GetHeaders() (http.Header, error)
+	RefreshToken(context.Context) error
+}
+
 type OAuthTokenProvider struct {
 	ts           oauth2.TokenSource
 	currentToken *oauth2.Token
