@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	iap_tunnel "github.com/davidspek/terraform-provider-iap-tunnel/internal/iap-tunnel"
+	tunnel "github.com/davidspek/go-iap-tunnel/pkg"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral/schema"
@@ -129,14 +129,14 @@ func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.Ope
 	// 	Interface: data.Interface.String(),
 	// 	Port:      int(data.RemotePort.ValueInt32()),
 	// }
-	target := iap_tunnel.TunnelTarget{
+	target := tunnel.TunnelTarget{
 		Project:   "prj-dl-dev-ooms-dev-2037",
 		Zone:      "us-central1-a",
 		Instance:  "bastion-vm",
 		Interface: "nic0",
 		Port:      6432,
 	}
-	manager := iap_tunnel.NewTunnelManager(target, nil)
+	manager := tunnel.NewTunnelManager(target, nil)
 
 	localPort := int(data.LocalPort.ValueInt32())
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", localPort)

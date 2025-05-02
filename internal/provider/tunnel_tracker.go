@@ -8,7 +8,7 @@ import (
 	"net"
 	"sync"
 
-	iap_tunnel "github.com/davidspek/terraform-provider-iap-tunnel/internal/iap-tunnel"
+	tunnel "github.com/davidspek/go-iap-tunnel/pkg"
 )
 
 type TunnelTracker struct {
@@ -45,7 +45,7 @@ func (t *TunnelTracker) Remove(name string) {
 
 type TunnelInfo struct {
 	listener net.Listener
-	manager  *iap_tunnel.TunnelManager
+	manager  *tunnel.TunnelManager
 	cancel   context.CancelFunc
 	// waitGroup *sync.WaitGroup
 	// conn     *websocket.Conn
