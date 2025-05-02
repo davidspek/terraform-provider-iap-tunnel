@@ -1,6 +1,3 @@
-// Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
-
 package provider
 
 import (
@@ -8,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"time"
 
 	iap_tunnel "github.com/davidspek/terraform-provider-iap-tunnel/internal/iap-tunnel"
@@ -15,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
 // Ensure provider defined types fully satisfy framework interfaces.
@@ -56,42 +55,29 @@ func (r *IapTunnelEphemeralResource) Metadata(_ context.Context, req ephemeral.M
 
 func (r *IapTunnelEphemeralResource) Schema(ctx context.Context, _ ephemeral.SchemaRequest, resp *ephemeral.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		// This description is used by the documentation generator and the language server.
 		MarkdownDescription: "The IAP Tunnel ephemeral resource allows for the creation of tunnels to Google Cloud instances using Identity-Aware Proxy (IAP).",
-
 		Attributes: map[string]schema.Attribute{
 			"project": schema.StringAttribute{
 				MarkdownDescription: "The Google Cloud project ID of the target instance.",
-				Required:            true, // Ephemeral resources expect their dependencies to already exist.
+				Required:            true,
 			},
 			"zone": schema.StringAttribute{
-				Computed: false,
-				// Sensitive:           true, // If applicable, mark the attribute as sensitive.
 				Required:            true,
 				MarkdownDescription: "The Google Cloud zone of the target instance.",
 			},
 			"instance": schema.StringAttribute{
-				Computed: false,
-				// Sensitive:           true, // If applicable, mark the attribute as sensitive.
 				MarkdownDescription: "The name of the target instance.",
 				Required:            true,
 			},
 			"remote_port": schema.Int32Attribute{
-				Computed: false,
-				// Sensitive:           true, // If applicable, mark the attribute as sensitive.
 				MarkdownDescription: "The port on the target instance to tunnel to.",
 				Required:            true,
 			},
 			"interface": schema.StringAttribute{
-				Computed: false,
-				// Sensitive:           true, // If applicable, mark the attribute as sensitive.
 				MarkdownDescription: "The network interface to use for the tunnel.",
-				Required:            false,
 				Optional:            true,
 			},
 			"local_port": schema.Int32Attribute{
-				Computed: false,
-				// Sensitive:           true, // If applicable, mark the attribute as sensitive.
 				MarkdownDescription: "The local port to bind the tunnel to.",
 				Required:            true,
 			},
@@ -100,47 +86,27 @@ func (r *IapTunnelEphemeralResource) Schema(ctx context.Context, _ ephemeral.Sch
 }
 
 func (r *IapTunnelEphemeralResource) Configure(ctx context.Context, req ephemeral.ConfigureRequest, resp *ephemeral.ConfigureResponse) {
-	// Always perform a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
 	if req.ProviderData == nil {
 		return
 	}
-
 	configData, ok := req.ProviderData.(*ProviderConfigData)
-
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Ephemeral Resource Configure Type",
 			fmt.Sprintf("Expected *ProviderConfigData, got: %T. Please report this issue to the provider developers.", req.ProviderData),
 		)
-
 		return
 	}
-
 	r.tunnelTracker = configData.Tracker
 }
 
 func (r *IapTunnelEphemeralResource) ValidateConfig(ctx context.Context, req ephemeral.ValidateConfigRequest, resp *ephemeral.ValidateConfigResponse) {
 	var data IapTunnelEphemeralResourceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
-
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// for _, localPortForwarding := range data.LocalPortForwardings {
-	// 	if !localPortForwarding.RetryDelay.IsNull() {
-	// 		if _, err := time.ParseDuration(localPortForwarding.RetryDelay.ValueString()); err != nil {
-	// 			resp.Diagnostics.AddError("Local Port Forwarding Error", fmt.Sprintf("Invalid retry delay: %s", err))
-	// 		}
-	// 	}
-	// }
 }
 
 func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.OpenRequest, resp *ephemeral.OpenResponse) {
 	var data IapTunnelEphemeralResourceModel
-
-	// Read Terraform config data into the model
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -156,93 +122,67 @@ func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.Ope
 	}
 	resp.Private.SetKey(ctx, iapTunnelPrivateDataKey, b)
 
-	target := iap_tunnel.IapTunnelTarget{
-		Project:   data.Project.String(),
-		Zone:      data.Zone.String(),
-		Instance:  data.Instance.String(),
-		Interface: data.Interface.String(),
-		Port:      int(data.RemotePort.ValueInt32()),
+	// target := iap_tunnel.TunnelTarget{
+	// 	Project:   data.Project.String(),
+	// 	Zone:      data.Zone.String(),
+	// 	Instance:  data.Instance.String(),
+	// 	Interface: data.Interface.String(),
+	// 	Port:      int(data.RemotePort.ValueInt32()),
+	// }
+	target := iap_tunnel.TunnelTarget{
+		Project:   "prj-dl-dev-ooms-dev-2037",
+		Zone:      "us-central1-a",
+		Instance:  "bastion-vm",
+		Interface: "nic0",
+		Port:      6432,
 	}
+	manager := iap_tunnel.NewTunnelManager(target, nil)
 
-	// Start the tunnel
+	localPort := int(data.LocalPort.ValueInt32())
+	listenAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
+	lis, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to listen on %s: %v", listenAddr, err))
+		return
+	}
+	tflog.Info(ctx, "Tunnel listening", map[string]interface{}{"listen_addr": listenAddr})
 
-	m := iap_tunnel.NewTunnelManager(int(data.LocalPort.ValueInt32()), target)
-	tunnelInfo.manager = m
-
-	errChan := make(chan error)
+	tunnelInfo.listener = lis
 	tunnelCtx, cancel := context.WithCancel(context.Background())
-
-	// Start error monitoring goroutine
-	go func() {
-		for {
-			select {
-			case err := <-m.Errors():
-				if err != nil {
-					// Log error but don't fail - allow reconnection logic to handle it
-					fmt.Printf("Tunnel error: %v\n", err)
-				}
-			case <-tunnelCtx.Done():
-				return
-			}
-		}
-	}()
-
-	// Start proxy in goroutine
-	go func() {
-		for {
-			if err := m.StartProxy(tunnelCtx); err != nil {
-				select {
-				case errChan <- err:
-				case <-tunnelCtx.Done():
-					return
-				}
-			}
-
-			// If we get here, the proxy has stopped but context isn't cancelled
-			// Wait before attempting reconnection
-			select {
-			case <-tunnelCtx.Done():
-				return
-			case <-time.After(time.Second * 5):
-				continue
-			}
-		}
-	}()
-
 	tunnelInfo.cancel = cancel
 
-	// Wait for initial connection to be established
-	select {
-	case err := <-errChan:
+	tunnelInfo.manager = manager
+
+	// Start Serve in a goroutine
+	go func() {
+		fmt.Printf("[IAP Tunnel] Starting tunnel on %s\n", listenAddr)
+		tflog.Info(ctx, "Starting tunnel", map[string]interface{}{"listen_addr": listenAddr})
+		err := manager.Serve(tunnelCtx, lis)
 		if err != nil {
-			resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
-			cancel()
-			return
+			tflog.Error(ctx, "Tunnel serve error", map[string]interface{}{"err": err})
+			resp.Diagnostics.AddError("Failed to serve tunnel", fmt.Sprintf("[IAP Tunnel] Serve error: %v", err))
 		}
-	case <-time.After(time.Second * 10):
-		// Timeout waiting for initial connection
-		fmt.Println("Tunnel initialization completed")
+	}()
+
+	// Forward tunnel errors to diagnostics
+	go func() {
+		for err := range manager.Errors() {
+			tflog.Error(ctx, "Tunnel error", map[string]interface{}{"err": err})
+			resp.Diagnostics.AddError("Tunnel error", err.Error())
+		}
+	}()
+
+	// Wait for the tunnel to be ready (CONNECT_SUCCESS received)
+	select {
+	case <-tunnelInfo.manager.Ready():
+		tflog.Info(ctx, "Tunnel is ready for connections", map[string]interface{}{"listen_addr": listenAddr})
+	case <-time.After(30 * time.Second):
+		resp.Diagnostics.AddError("Tunnel Error", "Timed out waiting for tunnel to become ready")
+		return
 	}
 
 	r.tunnelTracker.Add(id, tunnelInfo)
 
-	// select {
-	// // wait 5 seconds for an error, otherwise just log since this will run in the background for the course of the apply
-	// case <-tunnelCtx.Done():
-	// 	break
-	// case err := <-errChan:
-	// 	resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
-	// 	break
-	// }
-
-	// if err != nil {
-	// 	resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to start tunnel: %s", err))
-	// 	return
-	// }
-	// tunnelInfo.listener = lis
-	// tunnelInfo.conn = con
-
-	// Save data into ephemeral result data
 	resp.Diagnostics.Append(resp.Result.Set(ctx, &data)...)
 }
 
@@ -254,19 +194,21 @@ func (r *IapTunnelEphemeralResource) closeByConnectionID(id string) diag.Diagnos
 		return diags
 	}
 
-	tunnelInfo.cancel()
-
-	// Give some time for graceful shutdown
-	time.Sleep(time.Second)
-
-	// Stop the tunnel manager
-	if tunnelInfo.manager != nil {
-		if err := tunnelInfo.manager.Stop(); err != nil {
-			diags.AddError("Failed to stop tunnel manager", fmt.Sprintf("Failed to stop tunnel manager: %v", err))
-		}
+	if tunnelInfo.cancel != nil {
+		diags.AddWarning("", "[IAP Tunnel] Cancelling tunnel context...")
+		tunnelInfo.cancel()
 	}
 
+	if tunnelInfo.listener != nil {
+		fmt.Println("[IAP Tunnel] Closing listener...")
+		if err := tunnelInfo.listener.Close(); err != nil {
+			diags.AddError("Failed to close listener", fmt.Sprintf("Failed to close listener: %v", err))
+		}
+	}
+	fmt.Println("[IAP Tunnel] Tunnel listener closed.")
+
 	r.tunnelTracker.Remove(id)
+	fmt.Println("[IAP Tunnel] Tunnel resource cleanup complete.")
 
 	return diags
 }

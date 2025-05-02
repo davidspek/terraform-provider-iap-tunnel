@@ -11,20 +11,6 @@ import (
 	"strconv"
 )
 
-// IapTunnelTarget is a Go struct mirroring the Python namedtuple.
-type IapTunnelTarget struct {
-	Project     string
-	Zone        string
-	Instance    string
-	Interface   string
-	Port        int
-	URLOverride string
-	Network     string
-	Region      string
-	Host        string
-	DestGroup   string
-}
-
 // CreateWebSocketConnectURL builds the "connect" URL.
 func CreateWebSocketConnectURL(t TunnelTarget, newWebSocket bool) (string, error) {
 	if t.Project == "" || t.Port == 0 {

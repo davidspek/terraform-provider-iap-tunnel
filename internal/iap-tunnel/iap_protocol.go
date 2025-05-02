@@ -11,18 +11,18 @@ import (
 )
 
 type IAPTunnelProtocol struct {
+	mu              sync.RWMutex
 	totalInboundLen uint64
-	outboundLock    sync.Mutex
 	errors          chan error
 	connected       bool
 	sid             uint64
-	mu              sync.RWMutex
+	ready           chan struct{}
 }
 
-func NewIAPTunnelProtocol() *IAPTunnelProtocol {
+func NewIAPTunnelProtocol(ready chan struct{}) *IAPTunnelProtocol {
 	return &IAPTunnelProtocol{
-		// dataChannel: make(chan []byte, 100),
 		errors: make(chan error, 100),
+		ready:  ready,
 	}
 }
 
@@ -89,6 +89,13 @@ func (p *IAPTunnelProtocol) handleConnectSuccess(msg []byte) ([]byte, error) {
 	}
 	p.connected = true
 	p.sid = sid
+	// Signal readiness
+	select {
+	case <-p.ready:
+		// already closed
+	default:
+		close(p.ready)
+	}
 	return nil, nil
 }
 

@@ -55,13 +55,16 @@ type TunnelTarget struct {
 
 // NewTunnelAdapter creates a TunnelAdapter that implements io.ReadWriteCloser over the IAP websocket connection.
 // protocol should implement your IAP tunnel protocol logic.
-func NewTunnelAdapter(wsConn *websocket.Conn, protocol *IAPTunnelProtocol) *tunnelAdapter {
+func NewTunnelAdapter(wsConn *websocket.Conn) *tunnelAdapter {
+	ready := make(chan struct{})
+	protocol := NewIAPTunnelProtocol(ready)
 	return &tunnelAdapter{
 		conn:     wsConn,
 		protocol: protocol,
 		inbound:  make(chan []byte, 100),
-		errors:   make(chan error, 10),
+		errors:   make(chan error, 100),
 		closed:   make(chan struct{}),
+		ready:    ready,
 	}
 }
 
@@ -70,9 +73,10 @@ type tunnelAdapter struct {
 	conn     *websocket.Conn
 	protocol *IAPTunnelProtocol
 	inbound  chan []byte
+	pending  []byte
 	errors   chan error
 	closed   chan struct{}
-	pending  []byte
+	ready    chan struct{}
 }
 
 func (t *tunnelAdapter) Read(p []byte) (int, error) {
@@ -118,6 +122,7 @@ func (t *tunnelAdapter) Close() error {
 func (t *tunnelAdapter) Start(ctx context.Context) {
 	go func() {
 		defer close(t.inbound)
+		defer close(t.errors)
 		for {
 			_, msg, err := t.conn.Read(ctx)
 			if err != nil {
@@ -135,14 +140,20 @@ func (t *tunnelAdapter) Start(ctx context.Context) {
 	}()
 }
 
+// Ready returns a channel that signals when the tunnel is ready.
+func (t *tunnelAdapter) Ready() <-chan struct{} {
+	return t.ready
+}
+
 // TunnelManager manages the lifecycle of a local TCP listener and IAP tunnel connections.
 type TunnelManager struct {
 	target TunnelTarget
 	auth   TokenProvider
 
-	mu      sync.Mutex
-	errors  chan error
-	running bool
+	lastTunnel *tunnelAdapter
+	mu         sync.Mutex
+	errors     chan error
+	running    bool
 }
 
 // NewTunnelManager creates a new TunnelManager.
@@ -206,9 +217,28 @@ func (m *TunnelManager) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	defer wsConn.Close(websocket.StatusNormalClosure, "handler done")
 
-	tunnel := NewTunnelAdapter(wsConn, NewIAPTunnelProtocol())
+	tunnel := NewTunnelAdapter(wsConn)
+	m.mu.Lock()
+	m.lastTunnel = tunnel
+	m.mu.Unlock()
 	tunnel.Start(ctx)
 	defer tunnel.Close()
+	go func() {
+		for err := range tunnel.errors {
+			select {
+			case m.errors <- err:
+			default:
+			}
+		}
+	}()
+
+	// Wait for CONNECT_SUCCESS before proxying
+	select {
+	case <-tunnel.ready:
+		// Tunnel is ready
+	case <-ctx.Done():
+		return
+	}
 
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
@@ -219,6 +249,18 @@ func (m *TunnelManager) handleConn(ctx context.Context, conn net.Conn) {
 		fmt.Printf("[IAP Tunnel] Proxy error: %v\n", err)
 	}
 	fmt.Printf("[IAP Tunnel] Closed connection from %s\n", conn.RemoteAddr())
+}
+
+func (m *TunnelManager) Ready() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastTunnel != nil {
+		return m.lastTunnel.Ready()
+	}
+	// Return a closed channel if not available
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
 
 // startWebSocket establishes a websocket connection to the IAP tunnel backend.
@@ -248,19 +290,7 @@ func (m *TunnelManager) startWebSocket(ctx context.Context) (*websocket.Conn, *h
 // proxyBidirectional copies data in both directions until either side closes.
 func proxyBidirectional(ctx context.Context, a, b io.ReadWriteCloser) error {
 	g, _ := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		_, err := io.Copy(a, b)
-		if err != nil {
-			fmt.Printf("[IAP Tunnel] Error copying from a to b: %v\n", err)
-		}
-		return err
-	})
-	g.Go(func() error {
-		_, err := io.Copy(b, a)
-		if err != nil {
-			fmt.Printf("[IAP Tunnel] Error copying from b to a: %v\n", err)
-		}
-		return err
-	})
+	g.Go(func() error { _, err := io.Copy(a, b); return err })
+	g.Go(func() error { _, err := io.Copy(b, a); return err })
 	return g.Wait()
 }
