@@ -1,6 +1,7 @@
 module github.com/davidspek/terraform-provider-iap-tunnel
 
 go 1.22.7
+toolchain go1.24.1
 
 require (
 	github.com/coder/websocket v1.8.12
@@ -8,7 +9,7 @@ require (
 	github.com/hashicorp/terraform-plugin-go v0.26.0
 	github.com/hashicorp/terraform-plugin-testing v1.11.0
 	golang.org/x/oauth2 v0.25.0
-	golang.org/x/sync v0.11.0
+	golang.org/x/sync v0.14.0
 	google.golang.org/api v0.220.0
 )
 
