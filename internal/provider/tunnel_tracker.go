@@ -47,6 +47,4 @@ type TunnelInfo struct {
 	listener net.Listener
 	manager  *tunnel.TunnelManager
 	cancel   context.CancelFunc
-	// waitGroup *sync.WaitGroup
-	// conn     *websocket.Conn
 }

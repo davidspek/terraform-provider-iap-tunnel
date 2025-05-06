@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package provider
 
 import (
@@ -13,6 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
@@ -79,7 +83,8 @@ func (r *IapTunnelEphemeralResource) Schema(ctx context.Context, _ ephemeral.Sch
 			},
 			"local_port": schema.Int32Attribute{
 				MarkdownDescription: "The local port to bind the tunnel to.",
-				Required:            true,
+				Optional:            true,
+				Computed:            true,
 			},
 		},
 	}
@@ -122,19 +127,12 @@ func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.Ope
 	}
 	resp.Private.SetKey(ctx, iapTunnelPrivateDataKey, b)
 
-	// target := iap_tunnel.TunnelTarget{
-	// 	Project:   data.Project.String(),
-	// 	Zone:      data.Zone.String(),
-	// 	Instance:  data.Instance.String(),
-	// 	Interface: data.Interface.String(),
-	// 	Port:      int(data.RemotePort.ValueInt32()),
-	// }
 	target := tunnel.TunnelTarget{
-		Project:   "prj-dl-dev-ooms-dev-2037",
-		Zone:      "us-central1-a",
-		Instance:  "bastion-vm",
-		Interface: "nic0",
-		Port:      6432,
+		Project:   data.Project.ValueString(),
+		Zone:      data.Zone.ValueString(),
+		Instance:  data.Instance.ValueString(),
+		Interface: data.Interface.ValueString(),
+		Port:      int(data.RemotePort.ValueInt32()),
 	}
 	manager := tunnel.NewTunnelManager(target, nil)
 
@@ -145,7 +143,14 @@ func (r *IapTunnelEphemeralResource) Open(ctx context.Context, req ephemeral.Ope
 		resp.Diagnostics.AddError("Tunnel Error", fmt.Sprintf("Failed to listen on %s: %v", listenAddr, err))
 		return
 	}
-	tflog.Info(ctx, "Tunnel listening", map[string]interface{}{"listen_addr": listenAddr})
+	tcpAddr, ok := lis.Addr().(*net.TCPAddr)
+	if !ok {
+		resp.Diagnostics.AddError("Port Forwarding Error", "Listener address is not a TCP address")
+		resp.Diagnostics.Append(r.closeByConnectionID(id)...)
+		return
+	}
+	tflog.Info(ctx, "Tunnel listening", map[string]interface{}{"listen_addr": tcpAddr})
+	data.LocalPort = basetypes.NewInt32Value(int32(tcpAddr.Port))
 
 	tunnelInfo.listener = lis
 	tunnelCtx, cancel := context.WithCancel(context.Background())

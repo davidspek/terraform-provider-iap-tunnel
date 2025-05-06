@@ -35,7 +35,7 @@ type ProviderConfigData struct {
 type IapTunnelProviderModel struct{}
 
 func (p *IapTunnelProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
-	resp.TypeName = "google-iap"
+	resp.TypeName = "iap"
 	resp.Version = p.version
 }
 

@@ -1,3 +1,3 @@
-provider "google-iap" {
+provider "iap" {
   # example configuration here
 }

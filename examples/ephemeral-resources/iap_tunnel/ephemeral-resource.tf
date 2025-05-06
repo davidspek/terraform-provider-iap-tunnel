@@ -1,4 +1,4 @@
-ephemeral "google-iap_tunnel" "example" {
+ephemeral "iap_tunnel" "example" {
   project     = "my-project"
   zone        = "us-central1-a"
   instance    = "my-target"
